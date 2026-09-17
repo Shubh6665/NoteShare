@@ -47,10 +47,6 @@ function getOrCreateRoom(roomId: string): RoomState {
   return room;
 }
 
-/**
- * PERF: Broadcast raw string — avoids re-serialization.
- * The message is forwarded as-is to other clients.
- */
 function broadcastRaw(room: RoomState, rawMessage: string, exclude?: WebSocket) {
   for (const [client] of room.clients) {
     if (client !== exclude && client.readyState === WebSocket.OPEN) {
@@ -62,7 +58,6 @@ function broadcastRaw(room: RoomState, rawMessage: string, exclude?: WebSocket) 
 function notifyPeerStatus(room: RoomState) {
   const hasControl = [...room.clients.values()].includes('control');
   const hasDisplay = [...room.clients.values()].includes('display');
-
   for (const [client, role] of room.clients) {
     if (client.readyState === WebSocket.OPEN) {
       const peerConnected = role === 'control' ? hasDisplay : hasControl;
@@ -82,9 +77,7 @@ function getLanIP(): string {
     const nets = interfaces[name];
     if (!nets) continue;
     for (const net of nets) {
-      if (!net.internal && net.family === 'IPv4') {
-        return net.address;
-      }
+      if (!net.internal && net.family === 'IPv4') return net.address;
     }
   }
   return 'localhost';
@@ -99,48 +92,40 @@ function sanitizeRoomId(id: string): string {
 const app = express();
 const server = createServer(app);
 
-app.get('/api/ip', (_req, res) => {
-  res.json({ ip: getLanIP() });
-});
+app.get('/api/ip', (_req, res) => { res.json({ ip: getLanIP() }); });
+app.get('/api/health', (_req, res) => { res.json({ status: 'ok', rooms: rooms.size }); });
 
-app.get('/api/health', (_req, res) => {
-  res.json({ status: 'ok', rooms: rooms.size });
-});
-
-// Serve static files in production
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const distPath = path.join(__dirname, '..', 'dist');
 app.use(express.static(distPath));
-
-// SPA fallback for production
 app.get('{*path}', (req, res, next) => {
-  if (req.path.startsWith('/api') || req.path.startsWith('/ws')) {
-    return next();
-  }
-  res.sendFile(path.join(distPath, 'index.html'), (err) => {
-    if (err) next();
-  });
+  if (req.path.startsWith('/api') || req.path.startsWith('/ws')) return next();
+  res.sendFile(path.join(distPath, 'index.html'), (err) => { if (err) next(); });
 });
 
 // ─── WebSocket Server ────────────────────────────────────────────────────────
-// PERF: perMessageDeflate DISABLED — compression adds latency,
-//       on local network bandwidth is not a bottleneck.
+//
+// PROTOCOL:
+//   HOT PATH (text updates — no JSON):
+//     "T" + 13-digit-timestamp + raw-content
+//     Example: "T1694961234567Hello World"
+//     Server checks first char = "T", forwards raw, zero parsing.
+//
+//   COLD PATH (joins, settings, sync — JSON):
+//     Standard JSON messages.
+//
 
 const wss = new WebSocketServer({
   server,
   path: '/ws',
-  perMessageDeflate: false,       // ← PERF: no compression overhead
-  maxPayload: 1024 * 1024,        // 1MB max message
+  perMessageDeflate: false,
+  maxPayload: 2 * 1024 * 1024,
 });
 
 wss.on('connection', (ws: WebSocket, req) => {
-  // ── PERF CRITICAL: Disable Nagle's algorithm ──────────────────────────
-  // Nagle buffers small TCP packets for ~40ms before sending.
-  // For real-time apps this is UNACCEPTABLE. TCP_NODELAY sends immediately.
+  // PERF: Disable Nagle's algorithm
   const socket = (req.socket as any);
-  if (socket && typeof socket.setNoDelay === 'function') {
-    socket.setNoDelay(true);
-  }
+  if (socket?.setNoDelay) socket.setNoDelay(true);
 
   // Heartbeat
   (ws as any).__isAlive = true;
@@ -149,23 +134,39 @@ wss.on('connection', (ws: WebSocket, req) => {
   let joined = false;
 
   ws.on('message', (raw: Buffer) => {
-    const rawStr = raw.toString();
-    let msg: any;
-    try {
-      msg = JSON.parse(rawStr);
-    } catch {
+    const str = raw.toString();
+
+    // ── HOT PATH: Text Update ────────────────────────────────────────────
+    // First char = "T" → binary text protocol, skip JSON entirely.
+    // Format: "T" + 13-digit timestamp + raw content
+    // Server just: extracts content (for room state), forwards raw message.
+    if (str.charCodeAt(0) === 84 /* 'T' */) {
+      if (!joined) return;
+      const roomId = clientRooms.get(ws);
+      if (!roomId) return;
+      const room = rooms.get(roomId);
+      if (!room) return;
+
+      // Extract content (skip "T" + 13 digits = 14 chars)
+      room.content = str.length > 14 ? str.slice(14) : '';
+
+      // PERF: Forward the EXACT raw string — zero serialization
+      broadcastRaw(room, str, ws);
       return;
     }
+
+    // ── COLD PATH: JSON messages (JOIN, SETTINGS, etc.) ──────────────────
+    let msg: any;
+    try { msg = JSON.parse(str); }
+    catch { return; }
 
     switch (msg.type) {
       case 'JOIN': {
         const roomId = sanitizeRoomId(msg.room);
         if (!roomId) return;
-
         const role = msg.role === 'display' ? 'display' : 'control';
         const room = getOrCreateRoom(roomId);
 
-        // Remove from previous room
         const prevRoomId = clientRooms.get(ws);
         if (prevRoomId) {
           const prevRoom = rooms.get(prevRoomId);
@@ -180,31 +181,12 @@ wss.on('connection', (ws: WebSocket, req) => {
         clientRooms.set(ws, roomId);
         joined = true;
 
-        // Send current state
         ws.send(JSON.stringify({
           type: 'SYNC',
           content: room.content,
           settings: room.settings,
         }));
-
         notifyPeerStatus(room);
-        break;
-      }
-
-      case 'TEXT_UPDATE': {
-        if (!joined) return;
-        const roomId = clientRooms.get(ws);
-        if (!roomId) return;
-        const room = rooms.get(roomId);
-        if (!room) return;
-
-        // Store content
-        room.content = typeof msg.content === 'string' ? msg.content : '';
-
-        // PERF: Forward the ORIGINAL raw message string.
-        // We skip JSON.stringify entirely — the message is already
-        // serialized, just pass it through to other clients.
-        broadcastRaw(room, rawStr, ws);
         break;
       }
 
@@ -214,13 +196,10 @@ wss.on('connection', (ws: WebSocket, req) => {
         if (!roomId) return;
         const room = rooms.get(roomId);
         if (!room) return;
-
         if (msg.settings && typeof msg.settings === 'object') {
           room.settings = { ...room.settings, ...msg.settings };
         }
-
-        // Forward raw for settings too
-        broadcastRaw(room, rawStr, ws);
+        broadcastRaw(room, str, ws);
         break;
       }
     }
@@ -244,17 +223,13 @@ wss.on('connection', (ws: WebSocket, req) => {
     clientRooms.delete(ws);
   });
 
-  ws.on('error', () => { /* handled by close */ });
+  ws.on('error', () => {});
 });
 
-// ─── Heartbeat ───────────────────────────────────────────────────────────────
-
+// Heartbeat
 setInterval(() => {
   wss.clients.forEach((ws) => {
-    if ((ws as any).__isAlive === false) {
-      ws.terminate();
-      return;
-    }
+    if ((ws as any).__isAlive === false) { ws.terminate(); return; }
     (ws as any).__isAlive = false;
     ws.ping();
   });
@@ -273,7 +248,7 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log('╠═══════════════════════════════════════════════╣');
   console.log(`║  Local:     http://localhost:${PORT}              ║`);
   console.log(`║  Network:   http://${lanIP}:${PORT}          ║`);
-  console.log('║  WebSocket: /ws                               ║');
+  console.log('║  Protocol:  Binary text (no JSON on hot path) ║');
   console.log('║  Nagle:     DISABLED (TCP_NODELAY)            ║');
   console.log('║  Compress:  DISABLED (zero overhead)          ║');
   console.log('╚═══════════════════════════════════════════════╝');

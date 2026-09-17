@@ -21,6 +21,25 @@ const DEFAULT_SETTINGS: DisplaySettings = {
 const INITIAL_BACKOFF = 500;
 const MAX_BACKOFF = 10000;
 
+// ─── Deferred localStorage ──────────────────────────────────────────────────
+// localStorage.setItem is SYNCHRONOUS and blocks the main thread.
+// We defer writes so they don't sit in the critical path.
+
+let _storageTimer: ReturnType<typeof setTimeout> | null = null;
+const _storagePending = new Map<string, string>();
+
+function deferredStorage(key: string, value: string) {
+  _storagePending.set(key, value);
+  if (_storageTimer !== null) return;
+  _storageTimer = setTimeout(() => {
+    _storageTimer = null;
+    for (const [k, v] of _storagePending) {
+      try { localStorage.setItem(k, v); } catch { /* full */ }
+    }
+    _storagePending.clear();
+  }, 500); // write at most 2x per second — off the hot path
+}
+
 // ─── Hook ────────────────────────────────────────────────────────────────────
 
 interface UseWebSocketOptions {
@@ -53,39 +72,33 @@ export function useWebSocket(
   const onDirectUpdateRef = useRef(options?.onDirectContentUpdate);
   onDirectUpdateRef.current = options?.onDirectContentUpdate;
 
-  // ── rAF-based send queue ──────────────────────────────────────────────────
-  // Instead of a fixed debounce, we batch within one animation frame (≤16ms).
-  // This makes typing feel instant while never sending more than ~60 msgs/sec.
+  // ── rAF send queue ────────────────────────────────────────────────────────
   const pendingContentRef = useRef<string | null>(null);
   const rafRef = useRef<number | null>(null);
 
   const flushPending = useCallback(() => {
     rafRef.current = null;
     if (pendingContentRef.current !== null && wsRef.current?.readyState === WebSocket.OPEN) {
-      // Include send-timestamp for latency measurement
-      const msg = JSON.stringify({
-        type: 'TEXT_UPDATE',
-        content: pendingContentRef.current,
-        ts: Date.now(),
-      });
-      wsRef.current.send(msg);
+      // BINARY PROTOCOL: "T" + 13-digit timestamp + raw content
+      // No JSON.stringify — just string concatenation
+      wsRef.current.send('T' + Date.now() + pendingContentRef.current);
       pendingContentRef.current = null;
     }
   }, []);
 
   const scheduleFlush = useCallback(() => {
-    if (rafRef.current !== null) return; // already scheduled this frame
+    if (rafRef.current !== null) return;
     rafRef.current = requestAnimationFrame(flushPending);
   }, [flushPending]);
 
-  // ─── URL ─────────────────────────────────────────────────────────────────
+  // ─── URL ──────────────────────────────────────────────────────────────────
 
   const getWsUrl = useCallback(() => {
     const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     return `${proto}//${window.location.host}/ws`;
   }, []);
 
-  // ─── Connect ─────────────────────────────────────────────────────────────
+  // ─── Connect ──────────────────────────────────────────────────────────────
 
   const connect = useCallback(() => {
     if (!mountedRef.current) return;
@@ -100,23 +113,42 @@ export function useWebSocket(
     setStatus('connecting');
     const ws = new WebSocket(getWsUrl());
     wsRef.current = ws;
-    ws.binaryType = 'arraybuffer';
 
     ws.onopen = () => {
       if (!mountedRef.current) return;
       setStatus('connected');
       backoffRef.current = INITIAL_BACKOFF;
+      // JOIN is cold path — JSON is fine
       ws.send(JSON.stringify({ type: 'JOIN', room, role }));
     };
 
     ws.onmessage = (event) => {
       if (!mountedRef.current) return;
-      const receiveTime = Date.now(); // capture immediately on receive
+      const receiveTime = Date.now();
+      const data: string = event.data;
 
-      const data = typeof event.data === 'string'
-        ? event.data
-        : new TextDecoder().decode(event.data as ArrayBuffer);
+      // ── HOT PATH: Binary text protocol ────────────────────────────────
+      // First char = "T" → format: "T" + 13-digit-ts + content
+      // No JSON.parse needed — just string slicing
+      if (data.charCodeAt(0) === 84 /* 'T' */) {
+        const ts = parseInt(data.slice(1, 14), 10);
+        const c = data.length > 14 ? data.slice(14) : '';
+        const latencyMs = ts > 0 ? receiveTime - ts : undefined;
 
+        contentRef.current = c;
+
+        if (onDirectUpdateRef.current) {
+          onDirectUpdateRef.current(c, latencyMs);
+        } else {
+          setContent(c);
+        }
+
+        // DEFERRED: localStorage write off the hot path
+        deferredStorage(`noteshare_content_${room}`, c);
+        return;
+      }
+
+      // ── COLD PATH: JSON messages ──────────────────────────────────────
       let msg: any;
       try { msg = JSON.parse(data); }
       catch { return; }
@@ -131,36 +163,15 @@ export function useWebSocket(
             setContent(c);
           }
           setSettings(msg.settings || DEFAULT_SETTINGS);
-          try {
-            localStorage.setItem(`noteshare_content_${room}`, c);
-            localStorage.setItem(`noteshare_settings_${room}`, JSON.stringify(msg.settings));
-          } catch { /* ignore */ }
-          break;
-        }
-
-        case 'TEXT_UPDATE': {
-          const c = msg.content || '';
-          contentRef.current = c;
-
-          // Calculate latency if sender embedded a timestamp
-          const latencyMs = msg.ts ? receiveTime - msg.ts : undefined;
-
-          if (onDirectUpdateRef.current) {
-            onDirectUpdateRef.current(c, latencyMs);
-          } else {
-            setContent(c);
-          }
-
-          try { localStorage.setItem(`noteshare_content_${room}`, c); }
-          catch { /* ignore */ }
+          deferredStorage(`noteshare_content_${room}`, c);
+          deferredStorage(`noteshare_settings_${room}`, JSON.stringify(msg.settings));
           break;
         }
 
         case 'SETTINGS_UPDATE': {
           const s = msg.settings || DEFAULT_SETTINGS;
           setSettings(s);
-          try { localStorage.setItem(`noteshare_settings_${room}`, JSON.stringify(s)); }
-          catch { /* ignore */ }
+          deferredStorage(`noteshare_settings_${room}`, JSON.stringify(s));
           break;
         }
 
@@ -177,10 +188,10 @@ export function useWebSocket(
       scheduleReconnect();
     };
 
-    ws.onerror = () => { /* onclose handles it */ };
+    ws.onerror = () => {};
   }, [getWsUrl, room, role]);
 
-  // ─── Reconnect ───────────────────────────────────────────────────────────
+  // ─── Reconnect ────────────────────────────────────────────────────────────
 
   const scheduleReconnect = useCallback(() => {
     if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
@@ -192,52 +203,45 @@ export function useWebSocket(
     }, backoffRef.current);
   }, [connect]);
 
-  // ─── Send text (IMMEDIATE — paste) ───────────────────────────────────────
-  // Paste: cancel any pending rAF, send right now with timestamp
+  // ─── Send text IMMEDIATE (paste) ──────────────────────────────────────────
+  // Paste = send NOW, no batching, binary protocol
 
   const sendText = useCallback((text: string) => {
     contentRef.current = text;
     setContent(text);
-    try { localStorage.setItem(`noteshare_content_${room}`, text); }
-    catch { /* ignore */ }
+    deferredStorage(`noteshare_content_${room}`, text);
 
-    // Cancel pending rAF flush
+    // Cancel any pending rAF
     if (rafRef.current !== null) {
       cancelAnimationFrame(rafRef.current);
       rafRef.current = null;
     }
     pendingContentRef.current = null;
 
-    // Send immediately with timestamp
+    // BINARY PROTOCOL: immediate send
     if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
-        type: 'TEXT_UPDATE',
-        content: text,
-        ts: Date.now(),
-      }));
+      wsRef.current.send('T' + Date.now() + text);
     }
   }, [room]);
 
-  // ─── Send text (rAF batched — typing) ────────────────────────────────────
-  // Queue update, flush on next animation frame (max ~16ms wait, not 150ms)
+  // ─── Send text BATCHED (typing) ───────────────────────────────────────────
+  // Queued via rAF — max ≤16ms wait
 
   const sendTextDebounced = useCallback((text: string) => {
     contentRef.current = text;
     setContent(text);
-    try { localStorage.setItem(`noteshare_content_${room}`, text); }
-    catch { /* ignore */ }
+    deferredStorage(`noteshare_content_${room}`, text);
 
     pendingContentRef.current = text;
     scheduleFlush();
   }, [room, scheduleFlush]);
 
-  // ─── Send settings ───────────────────────────────────────────────────────
+  // ─── Send settings (cold path, JSON) ──────────────────────────────────────
 
   const sendSettings = useCallback((newSettings: Partial<DisplaySettings>) => {
     setSettings(prev => {
       const merged = { ...prev, ...newSettings };
-      try { localStorage.setItem(`noteshare_settings_${room}`, JSON.stringify(merged)); }
-      catch { /* ignore */ }
+      deferredStorage(`noteshare_settings_${room}`, JSON.stringify(merged));
       if (wsRef.current?.readyState === WebSocket.OPEN) {
         wsRef.current.send(JSON.stringify({ type: 'SETTINGS_UPDATE', settings: merged }));
       }
@@ -245,7 +249,7 @@ export function useWebSocket(
     });
   }, [room]);
 
-  // ─── Lifecycle ───────────────────────────────────────────────────────────
+  // ─── Lifecycle ────────────────────────────────────────────────────────────
 
   useEffect(() => {
     mountedRef.current = true;
