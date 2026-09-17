@@ -155,6 +155,15 @@ wss.on('connection', (ws: WebSocket, req) => {
       return;
     }
 
+    // ── PING/PONG: Latency measurement ──────────────────────────────────
+    // Client sends "P" + 13-digit timestamp → server echoes EXACT string back.
+    // Client calculates RTT = Date.now() - sentTimestamp.
+    // Uses ONE device's clock → no clock skew problem.
+    if (str.charCodeAt(0) === 80 /* 'P' */) {
+      ws.send(str); // echo immediately
+      return;
+    }
+
     // ── COLD PATH: JSON messages (JOIN, SETTINGS, etc.) ──────────────────
     let msg: any;
     try { msg = JSON.parse(str); }

@@ -43,7 +43,7 @@ function deferredStorage(key: string, value: string) {
 // ─── Hook ────────────────────────────────────────────────────────────────────
 
 interface UseWebSocketOptions {
-  onDirectContentUpdate?: (content: string, latencyMs?: number) => void;
+  onDirectContentUpdate?: (content: string) => void;
 }
 
 export function useWebSocket(
@@ -63,10 +63,13 @@ export function useWebSocket(
     } catch { return { ...DEFAULT_SETTINGS }; }
   });
   const [peerConnected, setPeerConnected] = useState(false);
+  const [rttMs, setRttMs] = useState<number | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
   const backoffRef = useRef(INITIAL_BACKOFF);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pingIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const rttBuf = useRef<number[]>([]);
   const mountedRef = useRef(true);
   const contentRef = useRef(content);
   const onDirectUpdateRef = useRef(options?.onDirectContentUpdate);
@@ -118,33 +121,54 @@ export function useWebSocket(
       if (!mountedRef.current) return;
       setStatus('connected');
       backoffRef.current = INITIAL_BACKOFF;
-      // JOIN is cold path — JSON is fine
       ws.send(JSON.stringify({ type: 'JOIN', room, role }));
+
+      // Start RTT ping interval — every 3 seconds
+      if (pingIntervalRef.current) clearInterval(pingIntervalRef.current);
+      pingIntervalRef.current = setInterval(() => {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send('P' + Date.now());
+        }
+      }, 3000);
+      // First ping immediately
+      ws.send('P' + Date.now());
     };
 
     ws.onmessage = (event) => {
       if (!mountedRef.current) return;
-      const receiveTime = Date.now();
       const data: string = event.data;
+      const firstChar = data.charCodeAt(0);
 
       // ── HOT PATH: Binary text protocol ────────────────────────────────
       // First char = "T" → format: "T" + 13-digit-ts + content
-      // No JSON.parse needed — just string slicing
-      if (data.charCodeAt(0) === 84 /* 'T' */) {
-        const ts = parseInt(data.slice(1, 14), 10);
+      if (firstChar === 84 /* 'T' */) {
         const c = data.length > 14 ? data.slice(14) : '';
-        const latencyMs = ts > 0 ? receiveTime - ts : undefined;
-
         contentRef.current = c;
 
         if (onDirectUpdateRef.current) {
-          onDirectUpdateRef.current(c, latencyMs);
+          onDirectUpdateRef.current(c);
         } else {
           setContent(c);
         }
 
-        // DEFERRED: localStorage write off the hot path
         deferredStorage(`noteshare_content_${room}`, c);
+        return;
+      }
+
+      // ── PONG: RTT latency measurement ─────────────────────────────────
+      // Server echoes back our "P" + timestamp. We compare with OUR clock.
+      // No cross-device clock skew — same device's clock both times.
+      if (firstChar === 80 /* 'P' */) {
+        const sentTs = parseInt(data.slice(1, 14), 10);
+        if (sentTs > 0) {
+          const rtt = Date.now() - sentTs;
+          rttBuf.current.push(rtt);
+          if (rttBuf.current.length > 5) rttBuf.current.shift();
+          const avg = Math.round(
+            rttBuf.current.reduce((a, b) => a + b, 0) / rttBuf.current.length
+          );
+          setRttMs(avg);
+        }
         return;
       }
 
@@ -258,6 +282,7 @@ export function useWebSocket(
       mountedRef.current = false;
       if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
       if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
+      if (pingIntervalRef.current) clearInterval(pingIntervalRef.current);
       if (wsRef.current) {
         wsRef.current.onclose = null;
         wsRef.current.close();
@@ -265,5 +290,5 @@ export function useWebSocket(
     };
   }, [connect]);
 
-  return { status, content, settings, peerConnected, sendText, sendTextDebounced, sendSettings };
+  return { status, content, settings, peerConnected, rttMs, sendText, sendTextDebounced, sendSettings };
 }
