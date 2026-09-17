@@ -1,0 +1,544 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+   NoteShare — Minimal, fast CSS. No framework. System fonts. Dark theme.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ─── Reset ──────────────────────────────────────────────────────────────── */
+
+*,
+*::before,
+*::after {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+  -moz-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+/* ─── Design Tokens ──────────────────────────────────────────────────────── */
+
+:root {
+  --bg-primary: #0a0a0c;
+  --bg-secondary: #111115;
+  --bg-tertiary: #1a1a20;
+  --bg-hover: #22222a;
+  --bg-code: #0d1117;
+
+  --text-primary: #e4e4e8;
+  --text-secondary: #9898a0;
+  --text-muted: #5a5a64;
+
+  --border: #2a2a32;
+  --border-focus: #4a4a58;
+  --border-code: #30363d;
+
+  --accent: #3b82f6;
+  --accent-hover: #2563eb;
+
+  --green: #22c55e;
+  --yellow: #f59e0b;
+  --red: #ef4444;
+
+  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Courier New', monospace;
+
+  --radius: 6px;
+  --radius-lg: 10px;
+}
+
+body {
+  font-family: var(--font-sans);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ─── Status Indicators ──────────────────────────────────────────────────── */
+
+.connection-status {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+}
+
+.status-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.status-dot.pulse {
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+.status-label {
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+/* ─── Buttons ────────────────────────────────────────────────────────────── */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px 14px;
+  font-size: 13px;
+  font-family: var(--font-sans);
+  font-weight: 500;
+  color: var(--text-primary);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+  white-space: nowrap;
+  user-select: none;
+}
+
+.btn:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-focus);
+}
+
+.btn:active {
+  transform: scale(0.97);
+}
+
+.btn-active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.btn-active:hover {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+
+.btn-danger {
+  color: var(--red);
+  border-color: rgba(239, 68, 68, 0.3);
+}
+
+.btn-danger:hover {
+  background: rgba(239, 68, 68, 0.12);
+  border-color: rgba(239, 68, 68, 0.5);
+}
+
+.btn-small {
+  padding: 4px 10px;
+  font-size: 12px;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   CONTROL PAGE (Mac) — Side-by-side layout
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.control-page {
+  display: flex;
+  flex-direction: column;
+  height: 100dvh;
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 12px 16px;
+  gap: 10px;
+}
+
+.control-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.app-title {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--text-primary);
+  letter-spacing: -0.02em;
+}
+
+/* ─── Main area: sidebar + editor ────────────────────────────────────────── */
+
+.control-main {
+  display: flex;
+  gap: 12px;
+  flex: 1;
+  min-height: 0; /* Critical for flex children to shrink */
+}
+
+.control-sidebar {
+  width: 260px;
+  flex-shrink: 0;
+  overflow-y: auto;
+}
+
+.control-editor {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+}
+
+/* ─── QR Panel (compact for sidebar) ─────────────────────────────────────── */
+
+.qr-panel {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.qr-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.qr-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.room-badge {
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--accent);
+  background: rgba(59, 130, 246, 0.1);
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.qr-body {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 12px;
+  flex: 1;
+}
+
+.qr-code-wrapper {
+  flex-shrink: 0;
+  background: #fff;
+  padding: 8px;
+  border-radius: var(--radius);
+}
+
+.qr-info {
+  width: 100%;
+}
+
+.qr-instruction {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-bottom: 8px;
+  text-align: center;
+}
+
+.url-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.display-url {
+  font-size: 10px;
+  font-family: var(--font-mono);
+  color: var(--text-muted);
+  background: var(--bg-tertiary);
+  padding: 4px 6px;
+  border-radius: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  word-break: break-all;
+}
+
+/* ─── Textarea ───────────────────────────────────────────────────────────── */
+
+.main-textarea {
+  width: 100%;
+  height: 100%;
+  padding: 14px 16px;
+  font-size: 15px;
+  font-family: var(--font-mono);
+  color: var(--text-primary);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  resize: none;
+  outline: none;
+  line-height: 1.6;
+  tab-size: 4;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+  transition: border-color 0.15s;
+}
+
+.main-textarea:focus {
+  border-color: var(--accent);
+}
+
+.main-textarea::placeholder {
+  color: var(--text-muted);
+}
+
+/* ─── Controls Bar ───────────────────────────────────────────────────────── */
+
+.controls-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.control-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.control-group-end {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+}
+
+.control-value {
+  font-size: 12px;
+  font-family: var(--font-mono);
+  color: var(--text-secondary);
+  min-width: 32px;
+  text-align: center;
+}
+
+.char-count {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   DISPLAY PAGE (iPhone)
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.display-container {
+  min-height: 100dvh;
+  padding: 20px;
+  padding-top: max(20px, env(safe-area-inset-top));
+  padding-bottom: max(20px, env(safe-area-inset-bottom));
+  padding-left: max(20px, env(safe-area-inset-left));
+  padding-right: max(20px, env(safe-area-inset-right));
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.display-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 12px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.display-text {
+  font-family: var(--font-mono);
+  color: var(--text-primary);
+  margin: 0;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+  tab-size: 4;
+  -moz-tab-size: 4;
+}
+
+.display-formatted {
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+}
+
+.display-waiting,
+.display-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 60dvh;
+  text-align: center;
+}
+
+.display-message {
+  font-size: 20px;
+  color: var(--text-secondary);
+  margin-bottom: 8px;
+}
+
+.display-sub {
+  font-size: 14px;
+  color: var(--text-muted);
+}
+
+.display-sub code {
+  font-family: var(--font-mono);
+  background: var(--bg-tertiary);
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-size: 13px;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   FORMATTED TEXT (Markdown-ish rendering)
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.formatted-text {
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+}
+
+/* Code blocks */
+.fmt-code-block {
+  margin: 12px 0;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border-code);
+  background: var(--bg-code);
+  overflow: hidden;
+}
+
+.fmt-code-lang {
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--text-muted);
+  padding: 6px 14px;
+  border-bottom: 1px solid var(--border-code);
+  background: rgba(255, 255, 255, 0.03);
+  text-transform: lowercase;
+}
+
+.fmt-code-pre {
+  margin: 0;
+  padding: 14px;
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+  line-height: 1.55;
+  color: var(--text-primary);
+  overflow-x: auto;
+  white-space: pre;
+  tab-size: 4;
+  -moz-tab-size: 4;
+}
+
+.fmt-code-pre code {
+  font-family: inherit;
+}
+
+/* Headings */
+.fmt-h1 {
+  font-size: 1.6em;
+  font-weight: 700;
+  margin: 20px 0 8px;
+  color: var(--text-primary);
+}
+
+.fmt-h2 {
+  font-size: 1.35em;
+  font-weight: 600;
+  margin: 16px 0 6px;
+  color: var(--text-primary);
+}
+
+.fmt-h3 {
+  font-size: 1.15em;
+  font-weight: 600;
+  margin: 12px 0 4px;
+  color: var(--text-primary);
+}
+
+/* Bullets */
+.fmt-bullet {
+  display: flex;
+  gap: 8px;
+  padding: 2px 0;
+}
+
+.fmt-bullet-dot {
+  color: var(--accent);
+  flex-shrink: 0;
+  font-weight: 700;
+}
+
+/* Horizontal rule */
+.fmt-hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 16px 0;
+}
+
+/* Lines & breaks */
+.fmt-line {
+  padding: 1px 0;
+}
+
+.fmt-break {
+  height: 12px;
+}
+
+/* Bold */
+.formatted-text strong {
+  font-weight: 700;
+  color: #fff;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Responsive — collapse sidebar on small screens
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+@media (max-width: 700px) {
+  .control-main {
+    flex-direction: column;
+  }
+
+  .control-sidebar {
+    width: 100%;
+    max-height: 200px;
+  }
+
+  .control-editor {
+    min-height: 250px;
+  }
+
+  .controls-bar {
+    gap: 6px;
+  }
+
+  .btn {
+    padding: 6px 10px;
+    font-size: 12px;
+  }
+}
