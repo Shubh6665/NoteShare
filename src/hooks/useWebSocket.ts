@@ -18,19 +18,13 @@ const DEFAULT_SETTINGS: DisplaySettings = {
   plainText: true,
 };
 
-const INITIAL_BACKOFF = 500;   // Start faster
+const INITIAL_BACKOFF = 500;
 const MAX_BACKOFF = 10000;
 
 // ─── Hook ────────────────────────────────────────────────────────────────────
 
 interface UseWebSocketOptions {
-  /**
-   * PERF: Direct DOM update callback for display page.
-   * When provided, TEXT_UPDATE content is passed here INSTEAD of
-   * going through React state → re-render → reconcile → DOM.
-   * This bypasses React entirely for the hot path.
-   */
-  onDirectContentUpdate?: (content: string) => void;
+  onDirectContentUpdate?: (content: string, latencyMs?: number) => void;
 }
 
 export function useWebSocket(
@@ -40,19 +34,14 @@ export function useWebSocket(
 ) {
   const [status, setStatus] = useState<ConnectionStatus>('connecting');
   const [content, setContent] = useState<string>(() => {
-    try {
-      return localStorage.getItem(`noteshare_content_${room}`) || '';
-    } catch {
-      return '';
-    }
+    try { return localStorage.getItem(`noteshare_content_${room}`) || ''; }
+    catch { return ''; }
   });
   const [settings, setSettings] = useState<DisplaySettings>(() => {
     try {
       const saved = localStorage.getItem(`noteshare_settings_${room}`);
       return saved ? { ...DEFAULT_SETTINGS, ...JSON.parse(saved) } : { ...DEFAULT_SETTINGS };
-    } catch {
-      return { ...DEFAULT_SETTINGS };
-    }
+    } catch { return { ...DEFAULT_SETTINGS }; }
   });
   const [peerConnected, setPeerConnected] = useState(false);
 
@@ -60,12 +49,36 @@ export function useWebSocket(
   const backoffRef = useRef(INITIAL_BACKOFF);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const mountedRef = useRef(true);
-  const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const contentRef = useRef(content); // PERF: avoid stale closures
+  const contentRef = useRef(content);
   const onDirectUpdateRef = useRef(options?.onDirectContentUpdate);
-
-  // Keep refs fresh
   onDirectUpdateRef.current = options?.onDirectContentUpdate;
+
+  // ── rAF-based send queue ──────────────────────────────────────────────────
+  // Instead of a fixed debounce, we batch within one animation frame (≤16ms).
+  // This makes typing feel instant while never sending more than ~60 msgs/sec.
+  const pendingContentRef = useRef<string | null>(null);
+  const rafRef = useRef<number | null>(null);
+
+  const flushPending = useCallback(() => {
+    rafRef.current = null;
+    if (pendingContentRef.current !== null && wsRef.current?.readyState === WebSocket.OPEN) {
+      // Include send-timestamp for latency measurement
+      const msg = JSON.stringify({
+        type: 'TEXT_UPDATE',
+        content: pendingContentRef.current,
+        ts: Date.now(),
+      });
+      wsRef.current.send(msg);
+      pendingContentRef.current = null;
+    }
+  }, []);
+
+  const scheduleFlush = useCallback(() => {
+    if (rafRef.current !== null) return; // already scheduled this frame
+    rafRef.current = requestAnimationFrame(flushPending);
+  }, [flushPending]);
+
+  // ─── URL ─────────────────────────────────────────────────────────────────
 
   const getWsUrl = useCallback(() => {
     const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -87,8 +100,6 @@ export function useWebSocket(
     setStatus('connecting');
     const ws = new WebSocket(getWsUrl());
     wsRef.current = ws;
-
-    // PERF: Set binary type to arraybuffer for faster parsing
     ws.binaryType = 'arraybuffer';
 
     ws.onopen = () => {
@@ -100,28 +111,25 @@ export function useWebSocket(
 
     ws.onmessage = (event) => {
       if (!mountedRef.current) return;
+      const receiveTime = Date.now(); // capture immediately on receive
 
-      // PERF: Parse once, act fast
-      const data = typeof event.data === 'string' ? event.data : new TextDecoder().decode(event.data);
+      const data = typeof event.data === 'string'
+        ? event.data
+        : new TextDecoder().decode(event.data as ArrayBuffer);
+
       let msg: any;
-      try {
-        msg = JSON.parse(data);
-      } catch {
-        return;
-      }
+      try { msg = JSON.parse(data); }
+      catch { return; }
 
       switch (msg.type) {
         case 'SYNC': {
           const c = msg.content || '';
           contentRef.current = c;
-
-          // Direct DOM update if available (display page)
           if (onDirectUpdateRef.current) {
             onDirectUpdateRef.current(c);
           } else {
             setContent(c);
           }
-
           setSettings(msg.settings || DEFAULT_SETTINGS);
           try {
             localStorage.setItem(`noteshare_content_${room}`, c);
@@ -134,25 +142,25 @@ export function useWebSocket(
           const c = msg.content || '';
           contentRef.current = c;
 
-          // PERF: Direct DOM path — skip React state entirely
+          // Calculate latency if sender embedded a timestamp
+          const latencyMs = msg.ts ? receiveTime - msg.ts : undefined;
+
           if (onDirectUpdateRef.current) {
-            onDirectUpdateRef.current(c);
+            onDirectUpdateRef.current(c, latencyMs);
           } else {
             setContent(c);
           }
 
-          try {
-            localStorage.setItem(`noteshare_content_${room}`, c);
-          } catch { /* ignore */ }
+          try { localStorage.setItem(`noteshare_content_${room}`, c); }
+          catch { /* ignore */ }
           break;
         }
 
         case 'SETTINGS_UPDATE': {
           const s = msg.settings || DEFAULT_SETTINGS;
           setSettings(s);
-          try {
-            localStorage.setItem(`noteshare_settings_${room}`, JSON.stringify(s));
-          } catch { /* ignore */ }
+          try { localStorage.setItem(`noteshare_settings_${room}`, JSON.stringify(s)); }
+          catch { /* ignore */ }
           break;
         }
 
@@ -184,46 +192,52 @@ export function useWebSocket(
     }, backoffRef.current);
   }, [connect]);
 
-  // ─── Send text (immediate — paste) ──────────────────────────────────────
+  // ─── Send text (IMMEDIATE — paste) ───────────────────────────────────────
+  // Paste: cancel any pending rAF, send right now with timestamp
 
   const sendText = useCallback((text: string) => {
     contentRef.current = text;
     setContent(text);
-    try {
-      localStorage.setItem(`noteshare_content_${room}`, text);
-    } catch { /* ignore */ }
+    try { localStorage.setItem(`noteshare_content_${room}`, text); }
+    catch { /* ignore */ }
 
+    // Cancel pending rAF flush
+    if (rafRef.current !== null) {
+      cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
+    }
+    pendingContentRef.current = null;
+
+    // Send immediately with timestamp
     if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ type: 'TEXT_UPDATE', content: text }));
+      wsRef.current.send(JSON.stringify({
+        type: 'TEXT_UPDATE',
+        content: text,
+        ts: Date.now(),
+      }));
     }
   }, [room]);
 
-  // ─── Send text debounced (typing) ────────────────────────────────────────
+  // ─── Send text (rAF batched — typing) ────────────────────────────────────
+  // Queue update, flush on next animation frame (max ~16ms wait, not 150ms)
 
   const sendTextDebounced = useCallback((text: string) => {
     contentRef.current = text;
     setContent(text);
-    try {
-      localStorage.setItem(`noteshare_content_${room}`, text);
-    } catch { /* ignore */ }
+    try { localStorage.setItem(`noteshare_content_${room}`, text); }
+    catch { /* ignore */ }
 
-    if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
-    debounceTimerRef.current = setTimeout(() => {
-      if (wsRef.current?.readyState === WebSocket.OPEN) {
-        wsRef.current.send(JSON.stringify({ type: 'TEXT_UPDATE', content: contentRef.current }));
-      }
-    }, 150);
-  }, [room]);
+    pendingContentRef.current = text;
+    scheduleFlush();
+  }, [room, scheduleFlush]);
 
-  // ─── Send settings ──────────────────────────────────────────────────────
+  // ─── Send settings ───────────────────────────────────────────────────────
 
   const sendSettings = useCallback((newSettings: Partial<DisplaySettings>) => {
     setSettings(prev => {
       const merged = { ...prev, ...newSettings };
-      try {
-        localStorage.setItem(`noteshare_settings_${room}`, JSON.stringify(merged));
-      } catch { /* ignore */ }
-
+      try { localStorage.setItem(`noteshare_settings_${room}`, JSON.stringify(merged)); }
+      catch { /* ignore */ }
       if (wsRef.current?.readyState === WebSocket.OPEN) {
         wsRef.current.send(JSON.stringify({ type: 'SETTINGS_UPDATE', settings: merged }));
       }
@@ -236,11 +250,10 @@ export function useWebSocket(
   useEffect(() => {
     mountedRef.current = true;
     connect();
-
     return () => {
       mountedRef.current = false;
       if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
-      if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
+      if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
       if (wsRef.current) {
         wsRef.current.onclose = null;
         wsRef.current.close();
@@ -248,13 +261,5 @@ export function useWebSocket(
     };
   }, [connect]);
 
-  return {
-    status,
-    content,
-    settings,
-    peerConnected,
-    sendText,
-    sendTextDebounced,
-    sendSettings,
-  };
+  return { status, content, settings, peerConnected, sendText, sendTextDebounced, sendSettings };
 }

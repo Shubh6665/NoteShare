@@ -2,37 +2,79 @@ import React, { useMemo, useRef, useCallback, useState } from 'react';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { FormattedText } from '../components/FormattedText';
 
+// ── Latency Meter ─────────────────────────────────────────────────────────────
+// Small overlay in corner showing real-time one-way latency.
+// Green < 30ms | Yellow 30-100ms | Red > 100ms
+
+const LatencyMeter = React.memo(function LatencyMeter({
+  latency,
+}: {
+  latency: number | null;
+}) {
+  if (latency === null) return null;
+
+  const color =
+    latency < 30 ? '#22c55e'
+    : latency < 100 ? '#f59e0b'
+    : '#ef4444';
+
+  return (
+    <div
+      style={{
+        position: 'fixed',
+        bottom: 12,
+        right: 12,
+        background: 'rgba(0,0,0,0.7)',
+        color,
+        fontFamily: 'ui-monospace, Menlo, monospace',
+        fontSize: 11,
+        padding: '4px 8px',
+        borderRadius: 6,
+        zIndex: 999,
+        backdropFilter: 'blur(4px)',
+        border: `1px solid ${color}33`,
+        pointerEvents: 'none',
+        userSelect: 'none',
+      }}
+    >
+      ⚡ {latency}ms
+    </div>
+  );
+});
+
+// ── Display Page ──────────────────────────────────────────────────────────────
+
 export const DisplayPage = React.memo(function DisplayPage() {
   const room = useMemo(() => {
     const params = new URLSearchParams(window.location.search);
     return params.get('room') || '';
   }, []);
 
-  // PERF: Direct DOM ref — bypasses React for text updates
+  // Direct DOM ref — bypasses React for the hot text-update path
   const preRef = useRef<HTMLPreElement>(null);
-  // Track content for formatted mode (needs React re-render)
   const [formattedContent, setFormattedContent] = useState('');
   const hasContentRef = useRef(false);
   const waitingRef = useRef<HTMLDivElement>(null);
 
+  // Latency tracking (rolling last-5 average for stability)
+  const [latency, setLatency] = useState<number | null>(null);
+  const latencyBuf = useRef<number[]>([]);
+
   /**
-   * PERF CRITICAL: This callback fires on every TEXT_UPDATE.
-   * Instead of: WebSocket → setState → React render → vDOM diff → DOM update
-   * We do:      WebSocket → direct textContent set
-   * 
-   * This skips React's entire reconciliation cycle.
-   * For a simple text node, React's diff is fast, but this is ZERO overhead.
+   * HOT PATH: called directly from WebSocket onmessage.
+   * No React setState for content — just set textContent on the DOM node.
+   * Also updates latency meter.
    */
-  const handleDirectUpdate = useCallback((content: string) => {
-    // Direct DOM update for plain text (the hot path)
+  const handleDirectUpdate = useCallback((content: string, latencyMs?: number) => {
+    // 1. Direct DOM write (plain text)
     if (preRef.current) {
       preRef.current.textContent = content;
     }
 
-    // Also update formatted content state (only re-renders when formatted mode is active)
+    // 2. Update formatted content (only re-renders in formatted mode)
     setFormattedContent(content);
 
-    // Show/hide waiting message
+    // 3. Show/hide waiting overlay
     if (waitingRef.current) {
       waitingRef.current.style.display = content ? 'none' : '';
     }
@@ -40,6 +82,16 @@ export const DisplayPage = React.memo(function DisplayPage() {
       preRef.current.style.display = content ? '' : 'none';
     }
     hasContentRef.current = !!content;
+
+    // 4. Update latency meter (rolling average of last 5 measurements)
+    if (latencyMs !== undefined && latencyMs >= 0 && latencyMs < 5000) {
+      latencyBuf.current.push(latencyMs);
+      if (latencyBuf.current.length > 5) latencyBuf.current.shift();
+      const avg = Math.round(
+        latencyBuf.current.reduce((a, b) => a + b, 0) / latencyBuf.current.length
+      );
+      setLatency(avg);
+    }
   }, []);
 
   const { status, settings } = useWebSocket(room, 'display', {
@@ -50,19 +102,22 @@ export const DisplayPage = React.memo(function DisplayPage() {
     return (
       <div className="display-container display-empty">
         <p className="display-message">No room specified.</p>
-        <p className="display-sub">Add <code>?room=XXXX-00</code> to the URL.</p>
+        <p className="display-sub">
+          Add <code>?room=XXXX-00</code> to the URL.
+        </p>
       </div>
     );
   }
 
   return (
     <div className="display-container">
-      {/* Connection indicator */}
+      {/* Connection status */}
       {status !== 'connected' && (
         <div className="display-status">
-          <span className="status-dot pulse" style={{
-            backgroundColor: status === 'reconnecting' ? '#f59e0b' : '#ef4444'
-          }} />
+          <span
+            className="status-dot pulse"
+            style={{ backgroundColor: status === 'reconnecting' ? '#f59e0b' : '#ef4444' }}
+          />
           <span>{status === 'reconnecting' ? 'Reconnecting…' : 'Connecting…'}</span>
         </div>
       )}
@@ -83,7 +138,7 @@ export const DisplayPage = React.memo(function DisplayPage() {
         />
       )}
 
-      {/* Formatted mode — needs React for markdown parsing */}
+      {/* Formatted mode */}
       {!settings.plainText && formattedContent && (
         <div
           className="display-formatted"
@@ -96,7 +151,7 @@ export const DisplayPage = React.memo(function DisplayPage() {
         </div>
       )}
 
-      {/* Waiting state */}
+      {/* Waiting placeholder */}
       <div
         ref={waitingRef}
         className="display-waiting"
@@ -105,6 +160,9 @@ export const DisplayPage = React.memo(function DisplayPage() {
         <p className="display-message">Waiting for text…</p>
         <p className="display-sub">Paste something on Mac to see it here.</p>
       </div>
+
+      {/* Latency meter overlay */}
+      <LatencyMeter latency={latency} />
     </div>
   );
 });
